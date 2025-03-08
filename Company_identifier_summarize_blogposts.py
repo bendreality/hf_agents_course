@@ -10,7 +10,7 @@ model = LiteLLMModel(
     model_id="ollama/qwen2.5-coder:14b",
     api_base="http://localhost:11434",
     api_key="noone needs an api key",
-    num_ctx=8192
+    num_ctx=24576
 )
 
 
@@ -121,37 +121,63 @@ def extract_postal_code(address: str) -> str:
     return "00000"  # Fallback, wenn keine PLZ gefunden wurde
 
 
-def generate_prompt(record: CompanyRecord) -> str:
+def generate_specific_prompt(record: CompanyRecord) -> str:
     """
-    Generiert einen angepassten Prompt basierend auf den verfügbaren Daten
+    Generiert einen präzisen, fokussierten Prompt basierend auf den verfügbaren Daten
 
     Args:
         record: Der zu analysierende Firmendatensatz
 
     Returns:
-        str: Ein angepasster Prompt für den Agenten
+        str: Ein angepasster Prompt für den Agenten mit präzisen Suchstrategien
     """
-    base_prompt = """
-    Du bist ein Experte für Firmenrecherche in Deutschland. Deine Aufgabe ist es, zu überprüfen, 
-    ob eine Firma an der angegebenen Adresse existiert.
+    # Extrahiere präzise Bestandteile der Adresse für gezielte Suchen
+    address_parts = record.address.split(',')[0].strip() if ',' in record.address else record.address.strip()
 
-    Nutze die zur Verfügung stehenden Tools, um Websuchen durchzuführen und Webseiten zu besuchen.
-    Sei gründlich aber effizient in deiner Recherche.
+    base_prompt = f"""
+    Du bist ein Experte für Firmenrecherche in Deutschland. Deine Aufgabe ist es, herauszufinden, 
+    ob an der spezifischen Adresse "{address_parts}" in Leverkusen eine Firma existiert.
 
-    Suchstrategie:
-    1. Überprüfe die Adresse und suche nach Firmen an diesem Standort
-    2. Wenn ein Firmenname vorhanden ist, suche gezielt nach dieser Firma
-    3. Wenn ein Kontaktname vorhanden ist, suche nach Verbindungen zu diesem Namen
-    4. Berücksichtige, dass alle Unternehmen in Leverkusen, Deutschland liegen
+    WICHTIG: Konzentriere dich ausschließlich auf diese genaue Adresse. Sei präzise und effizient, 
+    um das Context Window nicht unnötig zu belasten.
+
+    Führe folgende präzise Suchanfragen durch:
     """
 
-    # Anpassung des Prompts basierend auf verfügbaren Daten
+    # Baue präzise Suchanfragen basierend auf verfügbaren Daten
+    search_queries = []
+
+    # 1. Immer nach der konkreten Adresse suchen
+    search_queries.append(f"Firmen an {address_parts}, Leverkusen")
+
+    # 2. Wenn Firmenname bekannt, diesen mit der Adresse kombinieren
     if record.company:
-        base_prompt += f"\n\nAchte besonders auf den Firmennamen: {record.company}"
+        search_queries.append(f"{record.company} {address_parts} Leverkusen")
+
+    # 3. Wenn Kontaktname bekannt, diesen gezielt mit der Adresse kombinieren
     if record.contact_name:
-        base_prompt += f"\n\nSuche nach Firmen, die mit '{record.contact_name}' verbunden sind"
-    if record.email:
-        base_prompt += f"\n\nPrüfe, ob du die E-Mail-Adresse '{record.email}' bestätigen kannst"
+        search_queries.append(f"{record.contact_name} {address_parts} Leverkusen")
+
+    # 4. Spezifische Suche nach der E-Mail-Domain, wenn vorhanden
+    if record.email and '@' in record.email:
+        email_domain = record.email.split('@')[1]
+        search_queries.append(f"domain:{email_domain} {address_parts}")
+
+    # Füge die konkreten Suchstrategien zum Prompt hinzu
+    search_instructions = "\n".join([f"- Suche nach: \"{query}\"" for query in search_queries])
+    base_prompt += f"\n{search_instructions}\n\n"
+
+    # Anweisungen zur Informationsauswertung
+    base_prompt += """
+    Analyse:
+    1. Prüfe, ob an der EXAKTEN Adresse eine Firma registriert ist
+    2. Versuche den Firmennamen zu bestätigen, falls angegeben
+    3. Verifiziere die Kontaktperson, falls angegeben
+    4. Ignoriere alle Informationen, die nicht direkt mit dieser spezifischen Adresse zusammenhängen
+
+    Hinweis: Für lokale LLMs ist es wichtig, nur relevante Informationen zu sammeln und
+    irrelevante Details zu vermeiden, um das Context Window nicht zu überlasten.
+    """
 
     # Hinzufügen der zu analysierenden Daten
     data_summary = f"""
@@ -175,12 +201,12 @@ def generate_prompt(record: CompanyRecord) -> str:
     - **Email**: 
 
     ### Analysis
-    - **Verification on Google Maps**:
-    - **Search for Companies Located at the Specific Address**: 
-    - **Business Registration Information**: 
+    - **Address Verification**: [Beschreibe präzise, was an dieser Adresse existiert]
+    - **Company Verification**: [Bestätige/widerlege die Existenz der genannten Firma an dieser Adresse]
+    - **Contact Person Verification**: [Bestätige/widerlege die Verbindung der Kontaktperson]
 
     ### Conclusion
-    - **Company exists**: [Yes/No/Uncertain]
+    - **Company exists at this address**: [Yes/No/Uncertain]
     - **Confidence level**: [High/Medium/Low]
     - **Recommended action**: [Update database/Needs manual review/Delete record]
 
@@ -190,9 +216,9 @@ def generate_prompt(record: CompanyRecord) -> str:
     return base_prompt + "\n\n" + data_summary + "\n\n" + output_format
 
 
-def process_records_by_location(records: List[CompanyRecord], agent: CodeAgent) -> Dict[int, Dict]:
+def process_records(records: List[CompanyRecord], agent: CodeAgent) -> Dict[int, Dict]:
     """
-    Verarbeitet Datensätze gruppiert nach Standort für effizientere Anfragen
+    Verarbeitet einzelne Firmendatensätze mit präzisen Suchanfragen
 
     Args:
         records: Liste der zu verarbeitenden Firmendatensätze
@@ -201,48 +227,28 @@ def process_records_by_location(records: List[CompanyRecord], agent: CodeAgent) 
     Returns:
         Dict: Ein Dictionary mit Ergebnissen für jeden Datensatz
     """
-    # Gruppiere nach PLZ
-    records_by_location = {}
-    for record in records:
-        postal_code = extract_postal_code(record.address)
-        if postal_code not in records_by_location:
-            records_by_location[postal_code] = []
-        records_by_location[postal_code].append(record)
-
-    # Verarbeite Gruppen sequentiell
     results = {}
-    for postal_code, location_records in records_by_location.items():
-        print(f"Verarbeite Standort PLZ {postal_code} mit {len(location_records)} Datensätzen...")
 
-        # Führe einmal eine allgemeine Recherche zu dieser Location durch, wenn mehr als ein Datensatz
-        location_context = ""
-        if len(location_records) > 1:
-            location_query = f"Welche Unternehmen befinden sich im Postleitzahlenbereich {postal_code} in Leverkusen, Deutschland?"
-            try:
-                location_context = agent.run(location_query)
-                print(f"Allgemeine Standortinformationen für PLZ {postal_code} abgerufen.")
-            except Exception as e:
-                print(f"Fehler bei der Standortrecherche: {e}")
+    # Verarbeite jeden Datensatz einzeln mit präzisen, fokussierten Anfragen
+    for record in records:
+        print(f"Verarbeite Datensatz ID {record.id}: {record.address}")
 
-        # Verarbeite dann einzelne Records
-        for record in location_records:
-            prompt = generate_prompt(record)
-            if location_context:
-                prompt += f"\n\nAllgemeine Informationen zum Standort:\n{location_context}"
+        # Erstelle einen präzisen Suchprompt für diesen spezifischen Datensatz
+        prompt = generate_specific_prompt(record)
 
-            try:
-                analysis = agent.run(prompt)
-                write_to_markdown(analysis, f"{record.id}.md")
-                results[record.id] = evaluate_results(record.id, analysis)
-                print(f"Datensatz {record.id} erfolgreich verarbeitet.")
-            except Exception as e:
-                print(f"Fehler bei der Verarbeitung von Datensatz {record.id}: {e}")
-                results[record.id] = {
-                    "record_id": record.id,
-                    "error": str(e),
-                    "confidence": 0,
-                    "needs_manual_review": True
-                }
+        try:
+            analysis = agent.run(prompt)
+            write_to_markdown(analysis, f"{record.id}.md")
+            results[record.id] = evaluate_results(record.id, analysis)
+            print(f"Datensatz {record.id} erfolgreich verarbeitet.")
+        except Exception as e:
+            print(f"Fehler bei der Verarbeitung von Datensatz {record.id}: {e}")
+            results[record.id] = {
+                "record_id": record.id,
+                "error": str(e),
+                "confidence": 0,
+                "needs_manual_review": True
+            }
 
     return results
 
@@ -381,17 +387,18 @@ def main():
         [9, "ulrich dost", "Bayer 04 Leverkusen Fußball GmbH", "122-124, 51373 Leverkusen", ""]
     ]
 
-    # Erstelle Agenten
+    # Erstelle Agenten mit optimierten Parametern für lokale LLMs
     agent = CodeAgent(
         model=model,
         tools=[
-            CustomizableGoogleSearchTool(provider="serper", default_max_results=6),
+            # Reduziere die Anzahl der Ergebnisse, um das Context Window zu schonen
+            CustomizableGoogleSearchTool(provider="serper", default_max_results=3),
             VisitWebpageTool(),
             write_to_markdown
         ],
         additional_authorized_imports=[],
-        max_steps=20,
-        planning_interval=4  # Beibehalten des Planning-Intervalls
+        max_steps=6,  # Reduzierte Schritte für weniger Context-Verbrauch
+        planning_interval=4
     )
 
     # Konvertiere Daten in CompanyRecord-Objekte
@@ -407,8 +414,8 @@ def main():
     valid_records = [r for r in records if r.is_valid()]
     print(f"Verarbeite {len(valid_records)} von {len(records)} gültigen Datensätzen...")
 
-    # Verarbeite Datensätze gruppiert nach Standort
-    results = process_records_by_location(valid_records, agent)
+    # Verarbeite jeden Datensatz mit präzisen, fokussierten Anfragen
+    results = process_records(valid_records, agent)
 
     # Erstelle einen Zusammenfassungsbericht
     summary_report = create_summary_report(results, valid_records)
