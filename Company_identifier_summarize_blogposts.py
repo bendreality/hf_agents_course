@@ -10,8 +10,9 @@ model = LiteLLMModel(
     model_id="ollama/qwen2.5-coder:14b",
     api_base="http://localhost:11434",
     api_key="noone needs an api key",
-    num_ctx=24576
+    num_ctx=18000
 )
+
 
 
 # Verbesserte Datenstruktur für Firmendatensätze
@@ -215,7 +216,7 @@ def generate_specific_prompt(record: CompanyRecord) -> str:
 
     return base_prompt + "\n\n" + data_summary + "\n\n" + output_format
 
-
+@tool
 def process_records(records: List[CompanyRecord], agent: CodeAgent) -> Dict[int, Dict]:
     """
     Verarbeitet einzelne Firmendatensätze mit präzisen Suchanfragen
@@ -252,7 +253,7 @@ def process_records(records: List[CompanyRecord], agent: CodeAgent) -> Dict[int,
 
     return results
 
-
+@tool
 def evaluate_results(record_id: int, analysis: str) -> Dict:
     """
     Wertet die Analyseergebnisse aus und berechnet ein Konfidenzlevel
@@ -328,7 +329,7 @@ def evaluate_results(record_id: int, analysis: str) -> Dict:
         "needs_manual_review": confidence_level == "low" or recommendation == "needs manual review"
     }
 
-
+@tool
 def create_summary_report(results: Dict[int, Dict], records: List[CompanyRecord]) -> str:
     """
     Erstellt einen Zusammenfassungsbericht der Analyseergebnisse
@@ -378,23 +379,21 @@ def create_summary_report(results: Dict[int, Dict], records: List[CompanyRecord]
 def main():
     """Hauptfunktion zur Steuerung des Programmablaufs"""
     # Beispieldaten aus der ursprünglichen Datei
-    data_list = [
-        [4, "Herr Lupo", "", "Hitdorfer Str. 205, 51371 Leverkusen", ""],
-        [5, "", "", "Bergische Landstr. 67, 51375 Leverkusen, Schlebusch", ""],
-        [6, "", "Creditreform", "Hitdorfer Str. 205, 51371 Leverkusen", ""],
-        [7, "", "Creditreform 02/2002", "Bergische Landstr. 78, 51375 Leverkusen", ""],
-        [8, "", "Kfz Aufbereitung", "Höhenstr. 38, 51381 Leverkusen", "kuehnmi5@gmail.com"],
-        [9, "ulrich dost", "Bayer 04 Leverkusen Fußball GmbH", "122-124, 51373 Leverkusen", ""]
-    ]
+
+    import test_data
+
+    data_list = test_data.data_list_1
 
     # Erstelle Agenten mit optimierten Parametern für lokale LLMs
     agent = CodeAgent(
         model=model,
         tools=[
-            # Reduziere die Anzahl der Ergebnisse, um das Context Window zu schonen
-            CustomizableGoogleSearchTool(provider="serper", default_max_results=3),
+
+            CustomizableGoogleSearchTool(provider="serper", default_max_results=4),
             VisitWebpageTool(),
-            write_to_markdown
+            write_to_markdown,
+            create_summary_report,
+
         ],
         additional_authorized_imports=[],
         max_steps=6,  # Reduzierte Schritte für weniger Context-Verbrauch
