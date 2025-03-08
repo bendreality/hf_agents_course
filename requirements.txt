@@ -1,0 +1,11 @@
+markdownify~=1.0.0
+smolagents~=1.10.0
+requests~=2.32.3
+duckduckgo_search~=7.5.0
+pandas
+
+Crawl4AI~=0.5.0.post2
+pytz~=2025.1
+PyYAML~=6.0.2
+pillow~=11.1.0
+python-dotenv~=1.0.1
